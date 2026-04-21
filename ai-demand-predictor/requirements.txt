@@ -1,0 +1,6 @@
+prophet==1.1.5
+pandas==2.1.0
+numpy==1.25.2
+boto3==1.28.40
+matplotlib==3.7.2
+holidays==0.34

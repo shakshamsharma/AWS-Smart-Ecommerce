@@ -1,0 +1,46 @@
+{
+  "policies": [
+    {
+      "name": "scale-out-cpu",
+      "description": "Scale out when average CPU exceeds 65%",
+      "type": "TargetTrackingScaling",
+      "metric": "ASGAverageCPUUtilization",
+      "target_value": 65.0,
+      "cooldown": 180
+    },
+    {
+      "name": "scale-out-requests",
+      "description": "Scale out when ALB requests per target exceed 1000/min",
+      "type": "TargetTrackingScaling",
+      "metric": "ALBRequestCountPerTarget",
+      "target_value": 1000.0,
+      "cooldown": 180
+    },
+    {
+      "name": "flash-sale-scheduled",
+      "description": "Pre-scale to 10 instances before scheduled flash sale",
+      "type": "ScheduledScaling",
+      "schedule": "cron(45 19 ? * FRI *)",
+      "min_size": 10,
+      "max_size": 20,
+      "desired_capacity": 10
+    },
+    {
+      "name": "flash-sale-scale-in",
+      "description": "Scale back after sale ends",
+      "type": "ScheduledScaling",
+      "schedule": "cron(0 23 ? * FRI *)",
+      "min_size": 2,
+      "max_size": 20,
+      "desired_capacity": 2
+    }
+  ],
+  "protection": {
+    "scale_in_protection_enabled": true,
+    "protect_from_scale_in_during_deployment": true
+  },
+  "warmup": {
+    "default_instance_warmup": 90,
+    "health_check_grace_period": 90
+  }
+}

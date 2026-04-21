@@ -1,0 +1,223 @@
+name: Deploy to AWS
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+env:
+  AWS_REGION:      ap-south-1
+  ECR_REPOSITORY:  smart-ecommerce-backend
+  ASG_NAME:        smart-ecommerce-asg-prod
+
+jobs:
+  # ── Test ──────────────────────────────────────────────────────────────────────
+  test:
+    name: Run tests
+    runs-on: ubuntu-latest
+    services:
+      mysql:
+        image: mysql:8.0
+        env:
+          MYSQL_ROOT_PASSWORD: testpass
+          MYSQL_DATABASE: ecommerce_test
+        ports: ['3306:3306']
+        options: --health-cmd="mysqladmin ping" --health-interval=10s --health-timeout=5s --health-retries=3
+      redis:
+        image: redis:7-alpine
+        ports: ['6379:6379']
+        options: --health-cmd="redis-cli ping" --health-interval=5s --health-retries=5
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+          cache-dependency-path: backend/package-lock.json
+
+      - name: Install backend dependencies
+        run: npm ci
+        working-directory: backend
+
+      - name: Run backend tests
+        run: npm test
+        working-directory: backend
+        env:
+          NODE_ENV:  test
+          DB_HOST:   localhost
+          DB_USER:   root
+          DB_PASS:   testpass
+          DB_NAME:   ecommerce_test
+          REDIS_HOST: localhost
+          JWT_SECRET: test-secret
+
+      - name: Install frontend dependencies
+        run: npm ci
+        working-directory: frontend
+
+      - name: Build frontend
+        run: npm run build
+        working-directory: frontend
+        env:
+          REACT_APP_API_URL: /api
+
+  # ── Build & Push Docker image ─────────────────────────────────────────────────
+  build:
+    name: Build Docker image
+    needs: test
+    runs-on: ubuntu-latest
+    if: github.ref == 'refs/heads/main'
+    outputs:
+      image: ${{ steps.build.outputs.image }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id:     ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region:            ${{ env.AWS_REGION }}
+
+      - name: Login to Amazon ECR
+        id: login-ecr
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Build, tag, and push Docker image
+        id: build
+        env:
+          ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
+          IMAGE_TAG:    ${{ github.sha }}
+        run: |
+          IMAGE="$ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG"
+          docker build -t "$IMAGE" backend/
+          docker tag  "$IMAGE" "$ECR_REGISTRY/$ECR_REPOSITORY:latest"
+          docker push "$IMAGE"
+          docker push "$ECR_REGISTRY/$ECR_REPOSITORY:latest"
+          echo "image=$IMAGE" >> $GITHUB_OUTPUT
+
+  # ── Deploy frontend to S3 + CloudFront ───────────────────────────────────────
+  deploy-frontend:
+    name: Deploy frontend to S3
+    needs: test
+    runs-on: ubuntu-latest
+    if: github.ref == 'refs/heads/main'
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with: { node-version: 20 }
+
+      - name: Build frontend
+        run: |
+          npm ci
+          npm run build
+        working-directory: frontend
+        env:
+          REACT_APP_API_URL: ${{ secrets.REACT_APP_API_URL }}
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id:     ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region:            ${{ env.AWS_REGION }}
+
+      - name: Deploy to S3
+        run: |
+          aws s3 sync frontend/build/ s3://${{ secrets.S3_ASSETS_BUCKET }} \
+            --delete \
+            --cache-control "public, max-age=31536000" \
+            --exclude "index.html"
+          aws s3 cp frontend/build/index.html s3://${{ secrets.S3_ASSETS_BUCKET }}/index.html \
+            --cache-control "no-cache"
+
+      - name: Invalidate CloudFront cache
+        run: |
+          aws cloudfront create-invalidation \
+            --distribution-id ${{ secrets.CLOUDFRONT_DISTRIBUTION_ID }} \
+            --paths "/*"
+
+  # ── Deploy backend via instance refresh ──────────────────────────────────────
+  deploy-backend:
+    name: Deploy backend to ASG
+    needs: build
+    runs-on: ubuntu-latest
+    if: github.ref == 'refs/heads/main'
+
+    steps:
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id:     ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region:            ${{ env.AWS_REGION }}
+
+      - name: Update Launch Template with new image
+        run: |
+          # Get current launch template
+          LT_ID=$(aws autoscaling describe-auto-scaling-groups \
+            --auto-scaling-group-names $ASG_NAME \
+            --query 'AutoScalingGroups[0].LaunchTemplate.LaunchTemplateId' \
+            --output text)
+
+          # Create new version with updated image
+          aws ec2 create-launch-template-version \
+            --launch-template-id "$LT_ID" \
+            --source-version '$Latest' \
+            --launch-template-data "{\"ImageId\":\"${{ needs.build.outputs.image }}\"}"
+
+          # Set latest as default
+          aws ec2 modify-launch-template \
+            --launch-template-id "$LT_ID" \
+            --default-version '$Latest'
+
+      - name: Trigger ASG instance refresh (rolling deploy)
+        run: |
+          aws autoscaling start-instance-refresh \
+            --auto-scaling-group-name $ASG_NAME \
+            --preferences '{
+              "MinHealthyPercentage": 50,
+              "InstanceWarmup": 90
+            }'
+          echo "Instance refresh started — rolling deploy in progress"
+
+      - name: Wait for refresh to complete
+        run: |
+          for i in {1..30}; do
+            STATUS=$(aws autoscaling describe-instance-refreshes \
+              --auto-scaling-group-name $ASG_NAME \
+              --query 'InstanceRefreshes[0].Status' --output text)
+            echo "Status: $STATUS"
+            if [ "$STATUS" = "Successful" ]; then
+              echo "Deploy complete!"
+              exit 0
+            elif [ "$STATUS" = "Failed" ] || [ "$STATUS" = "Cancelled" ]; then
+              echo "Deploy failed!"
+              exit 1
+            fi
+            sleep 30
+          done
+          echo "Timeout waiting for refresh"
+          exit 1
+
+  # ── Notify ────────────────────────────────────────────────────────────────────
+  notify:
+    name: Notify deployment
+    needs: [deploy-frontend, deploy-backend]
+    runs-on: ubuntu-latest
+    if: always()
+    steps:
+      - name: Deployment summary
+        run: |
+          echo "Frontend deploy: ${{ needs.deploy-frontend.result }}"
+          echo "Backend deploy:  ${{ needs.deploy-backend.result }}"
+          echo "Commit: ${{ github.sha }}"
+          echo "Author: ${{ github.actor }}"

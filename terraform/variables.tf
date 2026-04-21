@@ -1,0 +1,16 @@
+variable "aws_region"         { default = "ap-south-1" }
+variable "project"            { default = "smart-ecommerce" }
+variable "environment"        { default = "prod" }
+variable "vpc_cidr"           { default = "10.0.0.0/16" }
+variable "ami_id"             { description = "Amazon Linux 2023 AMI ID" }
+variable "instance_type"      { default = "t3.medium" }
+variable "asg_min"            { default = 2 }
+variable "asg_max"            { default = 20 }
+variable "asg_desired"        { default = 2 }
+variable "db_instance_class"  { default = "db.t3.medium" }
+variable "db_name"            { default = "ecommerce" }
+variable "db_username"        { default = "admin" }
+variable "db_password"        { sensitive = true }
+variable "redis_node_type"    { default = "cache.t3.micro" }
+variable "acm_certificate_arn" { description = "ACM cert ARN for HTTPS" }
+variable "domain_name"        { description = "Your domain, e.g. shop.example.com" }

@@ -1,0 +1,62 @@
+services:
+  mysql:
+    image: mysql:8.0
+    container_name: ecommerce-mysql
+    restart: unless-stopped
+    environment:
+      MYSQL_ROOT_PASSWORD: rootpass
+      MYSQL_DATABASE: ecommerce
+      MYSQL_USER: appuser
+      MYSQL_PASSWORD: apppass
+    ports:
+      - "3307:3306"
+    volumes:
+      - mysql-data:/var/lib/mysql
+
+  redis:
+    image: redis:7-alpine
+    container_name: ecommerce-redis
+    restart: unless-stopped
+    ports:
+      - "6379:6379"
+
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile.dev
+    container_name: ecommerce-backend
+    restart: unless-stopped
+    ports:
+      - "3000:3000"
+    environment:
+      NODE_ENV: development
+      PORT: 3000
+      DB_HOST: mysql
+      DB_USER: appuser
+      DB_PASS: apppass
+      DB_NAME: ecommerce
+      REDIS_HOST: redis
+      REDIS_PORT: 6379
+      JWT_SECRET: dev-only-secret
+      AWS_REGION: ap-south-1
+    depends_on:
+      - mysql
+      - redis
+
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile.dev
+    container_name: ecommerce-frontend
+    restart: unless-stopped
+    ports:
+      - "3001:3000"
+    environment:
+      REACT_APP_API_URL: http://localhost:3000/api
+      CHOKIDAR_USEPOLLING: "true"
+      WDS_SOCKET_PORT: 0
+    depends_on:
+      - backend
+
+volumes:
+  mysql-data:
