@@ -109,5 +109,4 @@ python predict.py --horizon 24h
 - Configured RDS Multi-AZ, ElastiCache Redis, S3+CloudFront for stateless, fault-tolerant architecture
 - Automated CI/CD with GitHub Actions + Terraform; zero manual deployments to production
 
-## License
-MIT
+Author By Saksham Sharma
